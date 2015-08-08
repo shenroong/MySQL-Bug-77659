@@ -5170,7 +5170,7 @@ commit_cache_norebuild(
 			DBUG_ASSERT(*index->name != TEMP_INDEX_PREFIX);
 			DBUG_ASSERT(index->table == ctx->new_table);
 			DBUG_ASSERT(index->to_be_dropped);
-
+			
 			/* Replace the indexes in foreign key
 			constraints if needed. */
 
@@ -5188,14 +5188,26 @@ commit_cache_norebuild(
 
 		trx_start_for_ddl(trx, TRX_DICT_OP_INDEX);
 		row_merge_drop_indexes_dict(trx, ctx->new_table->id);
-
+		
+		/*a vector to keep track of column with dropped indeex
+         bug fix for percona Bug #1469901(https://bugs.launchpad.net/percona-server/+bug/1469901?comments=all)
+         and MySQL Bug #77659 (http://bugs.mysql.com/bug.php?id=77659)
+         */
+		std::vector<ulint>  column_set;
+	
 		for (ulint i = 0; i < ctx->num_to_drop_index; i++) {
 			dict_index_t*	index = ctx->drop_index[i];
 			DBUG_ASSERT(*index->name != TEMP_INDEX_PREFIX);
 			DBUG_ASSERT(index->table == ctx->new_table);
+			
+			/*add column position to the set for dropped indexes*/
+			for(ulint i = 0; i < index->n_user_defined_cols; i++){
+				column_set.push_back(dict_index_get_nth_col_no(index, i));
+
+			}			
 
 			if (index->type & DICT_FTS) {
-				DBUG_ASSERT(index->type == DICT_FTS
+                DBUG_ASSERT(index->type == DICT_FTS
 					    || (index->type
 						& DICT_CORRUPT));
 				DBUG_ASSERT(index->table->fts);
@@ -5204,10 +5216,36 @@ commit_cache_norebuild(
 
 			dict_index_remove_from_cache(index->table, index);
 		}
+		
+        /*loop through dict_indexes, if the column set contains its column postion, remove from the set */
+		if (ctx->num_to_drop_index>0){
+            dict_index_t *first_index = ctx->drop_index[0];
+            dict_index_t* table_index;
+        		
+            for (table_index = dict_table_get_first_index(first_index->table);
+                    table_index;
+        			table_index = dict_table_get_next_index(table_index)){
+        			
+                    /* only go through the indexes which are not going to drop */
+                if (table_index->to_be_dropped == 0){
+                    for(ulint i = 0; i < table_index->n_user_defined_cols; i++){
+                        ulint ind = dict_index_get_nth_col_no(table_index, i);
+                        column_set.erase(std::remove(column_set.begin(), column_set.end(), ind), column_set.end());
+                    }
+					if (column_set.size()==0){
+                        break;
+					}
+				}	
+			}
 
+            /* iterator the set , if the column position still remain in the set change ord_part to 0 */
+            for (std::vector<ulint>::size_type i = 0; i != column_set.size(); i++){
+                first_index->table->cols[column_set[i]].ord_part = 0;
+            }
+		}
 		trx_commit_for_mysql(trx);
 	}
-
+	
 	DBUG_RETURN(found);
 }
 
